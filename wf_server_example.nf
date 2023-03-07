@@ -6,7 +6,18 @@ import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer
 import org.springframework.amqp.rabbit.listener.api.*
 import java.io.BufferedWriter
 import java.io.OutputStreamWriter
+import java.lang.String;
+import java.lang.Thread
 import java.nio.charset.Charset
+import java.nio.charset.StandardCharsets;
+
+import com.rabbitmq.client.CancelCallback
+import com.rabbitmq.client.Channel;
+import com.rabbitmq.client.Connection;
+import com.rabbitmq.client.ConnectionFactory;
+import com.rabbitmq.client.DefaultConsumer
+import com.rabbitmq.client.DeliverCallback;
+
 nextflow.enable.dsl=2
 
 // These parameters can also be overwritten with values passed from the CLI
@@ -20,7 +31,7 @@ params.rmq_address = "localhost:5672"
 params.rmq_username = "mm-test"
 params.rmq_password = "mm-test"
 params.rmq_exchange = "ocrd-network-default"
-
+rmq_uri = "amqp://${params.rmq_username}:${params.rmq_password}@${params.rmq_address}"
 
 log.info """\
   O C R - D - W O R K F L O W - W E B A P I - 1
@@ -28,18 +39,10 @@ log.info """\
   processing_server_address : ${params.processing_server_address}
   mets                      : ${params.mets}
   input_file_grp            : ${params.input_file_grp}
+  rmq_uri                   : ${rmq_uri}
   """
   .stripIndent()
 
-
-// This global variable is used to track the status of 
-// the previous process job in the when block of the current process job
-job_status_flag = "NONE"
-
-
-// RabbitMQ related globals
-rmq_uri = "amqp://${params.rmq_username}:${params.rmq_password}@${params.rmq_address}"
-println(rmq_uri)
 
 def produce_job_input_json(input_grp, output_grp, page_id, ocrd_params){
   // TODO: Using string builder should be more computationally efficient
@@ -81,85 +84,72 @@ def post_processing_job(ocrd_processor, input_grp, output_grp, page_id, ocrd_par
   }
 }
 
-def configure_queue_listener(result_queue_name){
-  cf = new CachingConnectionFactory(new URI(rmq_uri))
-  def rmq_admin = new RabbitAdmin(cf)
-  def rmq_exchange = new DirectExchange(params.rmq_exchange, false, false)
-  rmq_admin.declareExchange(rmq_exchange)
+String parse_body(byte[] bytes) {
+  if (bytes) {
+    new String(bytes, Charset.forName('UTF-8'))
+  }
+}
 
-  def rmq_queue = new Queue(result_queue_name, false)
-  rmq_admin.declareQueue(rmq_queue)
-  rmq_admin.declareBinding(BindingBuilder.bind(rmq_queue).to(rmq_exchange).withQueueName())
+String find_job_status(String message_body){
+  // TODO: Use Regex
+  if (message_body.contains("SUCCESS")){
+    return "SUCCESS"
+  } 
+  else if (message_body.contains("FAILED")){
+    return "FAILED"
+  }
+  else if (message_body.contains("RUNNING")){
+    return "RUNNING"
+  }
+  else if (message_body.contains("QUEUED")){
+    return "QUEUED"
+  }
+  else {
+    return "NONE"
+  }
+}
 
-  def listener = new SimpleMessageListenerContainer()
-  listener.setConnectionFactory(cf)
-  listener.setQueues(rmq_queue)
-  listener.setConcurrentConsumers(1)
-  listener.setMessageListener(new ChannelAwareMessageListener() {
-    @Override
-    void onMessage(Message message, com.rabbitmq.client.Channel channel) {
-      println "Message received ${new Date()}"
-      // println (message)
-      def delivery_tag = message.getMessageProperties().getDeliveryTag()
-      def consumer_tag = message.getMessageProperties().getConsumerTag()
-      println "Consumer tag: ${consumer_tag}"
-      println "Delivery tag: ${delivery_tag}"
-      job_status = find_job_status(parse_body(message.getBody()))
-      println "JobStatus: ${job_status}"
-      // Overwrites the global status flag
-      job_status_flag = job_status
-      channel.basicAck(delivery_tag, false)
-      // channel.basicCancel(consumer_tag)
-      println "Trying to stop listener"
-      // channel.close(0, "Closing the channel after successful consumption.")
-      listener.doShutdown()
-      println "After stop listener"
-    }
-    String parse_body(byte[] bytes) {
-      if (bytes) {
-        new String(bytes, Charset.forName('UTF-8'))
-      }
-    }
-    String find_job_status(String message_body){
-      // TODO: Use Regex
-      if (message_body.contains("SUCCESS")){
-        return "SUCCESS"
-      } 
-      else if (message_body.contains("FAILED")){
-        return "FAILED"
-      }
-      else if (message_body.contains("RUNNING")){
-        return "RUNNING"
-      }
-      else if (message_body.contains("QUEUED")){
-        return "QUEUED"
-      }
-      else {
-        return "NONE"
-      }
-    }
-  })
+def configure_and_consume_polling(result_queue_name){
+  def ConnectionFactory factory = new ConnectionFactory();
+  factory.setUri(rmq_uri);
+  def com.rabbitmq.client.Connection rmq_connection = factory.newConnection();
+  def com.rabbitmq.client.Channel rmq_channel = rmq_connection.createChannel();
 
-  return listener
+  // rmq_channel.exchangeDeclare(params.rmq_exchange, "direct", true);
+  rmq_channel.queueDeclare(result_queue_name, false, false, false, null);
+  rmq_channel.queueBind(result_queue_name, params.rmq_exchange, params.rmq_exchange);
+
+  def job_status = "NONE"
+  try {
+    while(true){
+      def response = rmq_channel.basicGet(result_queue_name, true)
+      if(response){
+        println "Message received on ${new Date()}"
+        def delivery_tag = response.getEnvelope().getDeliveryTag()
+        println "Delivery tag: ${delivery_tag}"
+        job_status = find_job_status(parse_body(response.getBody()))
+        println "JobStatus: ${job_status}"
+        println "Canceling polling for queue: ${result_queue_name}"
+        break;
+      }
+      // This should be a higher value for production
+      sleep(3)
+    }
+  } catch (Exception error) {
+    println("Caught exception: ${error}")
+  }
+
+  return job_status
 }
 
 def exec_block_logic(ocrd_processor_str, input_dir, output_dir, page_id, ocrd_params){
-  String result_queue = "${ocrd_processor_str}-result"
+  def String result_queue = "${ocrd_processor_str}-result"
   post_processing_job(ocrd_processor_str, input_dir, output_dir, null, null)
-  job_status_flag = "INITIALIZED"
-  def listener = configure_queue_listener(result_queue)
-  // The job_status_flag is with value "INITIALIZED" here
-  println "Starting listening, flag: ${job_status_flag}"
-  listener.start()
-  // The job_status_flag must be with value "SUCCESS" or "FAILED" here
-  println "Ended listening, flag: ${job_status_flag}"
-
-  // The job_status_flag gets overwritten inside the onMessage 
-  // method when a message is consumed from the result queue
-  return job_status_flag
+  def job_status = configure_and_consume_polling(result_queue)
+  return job_status
 }
 
-process binarize {
+process ocrd_cis_ocropy_binarize {
   maxForks 1
 
   input:
@@ -172,10 +162,10 @@ process binarize {
 
   exec:
     job_status = exec_block_logic("ocrd-cis-ocropy-binarize", input_dir, output_dir, null, null)
-    println "binarize returning flag: ${job_status}"
+    println "ocrd_cis_ocropy_binarize returning flag: ${job_status}"
 }
 
-process crop {
+process ocrd_anybaseocr_crop {
   maxForks 1
 
   input:
@@ -192,11 +182,137 @@ process crop {
 
   exec:
     job_status = exec_block_logic("ocrd-anybaseocr-crop", input_dir, output_dir, null, null)
-    println "crop returning flag: ${job_status}"
+    println "ocrd_anybaseocr_crop returning flag: ${job_status}"
+}
+
+process ocrd_skimage_binarize {
+  maxForks 1
+
+  input:
+    val input_dir
+    val output_dir
+    val prev_job_status
+
+  when:
+    prev_job_status == "SUCCESS"
+
+  output:
+    val output_dir
+    val job_status
+
+  exec:
+    job_status = exec_block_logic("ocrd-skimage-binarize", input_dir, output_dir, null, '{"method": "li"}')
+    println "ocrd_skimage_binarize returning flag: ${job_status}"
+}
+
+process ocrd_skimage_denoise {
+  maxForks 1
+
+  input:
+    val input_dir
+    val output_dir
+    val prev_job_status
+
+  when:
+    prev_job_status == "SUCCESS"
+
+  output:
+    val output_dir
+    val job_status
+
+  exec:
+    job_status = exec_block_logic("ocrd-skimage-denoise", input_dir, output_dir, null, '{"level-of-operation": "page"}')
+    println "ocrd_skimage_denoise returning flag: ${job_status}"
+}
+
+process ocrd_tesserocr_deskew {
+  maxForks 1
+
+  input:
+    val input_dir
+    val output_dir
+    val prev_job_status
+
+  when:
+    prev_job_status == "SUCCESS"
+
+  output:
+    val output_dir
+    val job_status
+
+  exec:
+    job_status = exec_block_logic("ocrd-tesserocr-deskew", input_dir, output_dir, null, '{"operation_level": "page"}')
+    println "ocrd_tesserocr_deskew returning flag: ${job_status}"
+}
+
+process ocrd_cis_ocropy_segment {
+  maxForks 1
+
+  input:
+    val input_dir
+    val output_dir
+    val prev_job_status
+
+  when:
+    prev_job_status == "SUCCESS"
+
+  output:
+    val output_dir
+    val job_status
+
+  exec:
+    job_status = exec_block_logic("ocrd-cis-ocropy-segment", input_dir, output_dir, null, '{"level-of-operation": "page"}')
+    println "ocrd_cis_ocropy_segment returning flag: ${job_status}"
+}
+
+process ocrd_cis_ocropy_dewarp {
+  maxForks 1
+
+  input:
+    val input_dir
+    val output_dir
+    val prev_job_status
+
+  when:
+    prev_job_status == "SUCCESS"
+
+  output:
+    val output_dir
+    val job_status
+
+  exec:
+    job_status = exec_block_logic("ocrd-cis-ocropy-dewarp", input_dir, output_dir, null, null)
+    println "ocrd_cis_ocropy_dewarp returning flag: ${job_status}"
+}
+
+process ocrd_calamari_recognize {
+  maxForks 1
+
+  input:
+    val input_dir
+    val output_dir
+    val prev_job_status
+
+  when:
+    prev_job_status == "SUCCESS"
+
+  output:
+    val output_dir
+    val job_status
+
+  exec:
+    job_status = exec_block_logic("ocrd-calamari-recognize", input_dir, output_dir, null, '{"checkpoint_dir": "qurator-gt4histocr-1.0"}')
+    println "ocrd_calamari_recognize returning flag: ${job_status}"
 }
 
 workflow {
   main:
-    binarize(params.input_file_grp, "OCR-D-BIN")
-    crop(binarize.out[0], "OCR-D-CROP", binarize.out[1])
+    ocrd_cis_ocropy_binarize(params.input_file_grp, "OCR-D-BIN")
+    ocrd_anybaseocr_crop(ocrd_cis_ocropy_binarize.out[0], "OCR-D-CROP", ocrd_cis_ocropy_binarize.out[1])
+    ocrd_skimage_binarize(ocrd_anybaseocr_crop.out[0], "OCR-D-BIN2", ocrd_anybaseocr_crop.out[1])
+    ocrd_skimage_denoise(ocrd_skimage_binarize.out[0], "OCR-D-BIN-DENOISE", ocrd_skimage_binarize.out[1])
+    ocrd_tesserocr_deskew(ocrd_skimage_denoise.out[0], "OCR-D-BIN-DENOISE-DESKEW", ocrd_skimage_denoise.out[1])
+    ocrd_cis_ocropy_segment(ocrd_tesserocr_deskew.out[0], "OCR-D-SEG", ocrd_tesserocr_deskew.out[1])
+    ocrd_cis_ocropy_dewarp(ocrd_cis_ocropy_segment.out[0], "OCR-D-SEG-LINE-RESEG-DEWARP", ocrd_cis_ocropy_segment.out[1])
+    ocrd_calamari_recognize(ocrd_cis_ocropy_dewarp.out[0], "OCR-D-OCR", ocrd_cis_ocropy_dewarp.out[1])
 }
