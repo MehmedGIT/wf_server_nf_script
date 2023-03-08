@@ -1,22 +1,17 @@
-@Grab(group='org.springframework.boot', module='spring-boot-starter-amqp', version='2.2.2.RELEASE')
-import org.springframework.amqp.core.*
-import org.springframework.amqp.rabbit.connection.CachingConnectionFactory
-import org.springframework.amqp.rabbit.core.RabbitAdmin
-import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer
-import org.springframework.amqp.rabbit.listener.api.*
+@Grab(group='com.rabbitmq', module='amqp-client', version='5.16.0')
+import com.rabbitmq.client.CancelCallback
+import com.rabbitmq.client.Channel
+import com.rabbitmq.client.Connection
+import com.rabbitmq.client.ConnectionFactory
+import com.rabbitmq.client.DefaultConsumer
+import com.rabbitmq.client.DeliverCallback
+
 import java.io.BufferedWriter
 import java.io.OutputStreamWriter
-import java.lang.String;
+import java.lang.String
 import java.lang.Thread
 import java.nio.charset.Charset
-import java.nio.charset.StandardCharsets;
-
-import com.rabbitmq.client.CancelCallback
-import com.rabbitmq.client.Channel;
-import com.rabbitmq.client.Connection;
-import com.rabbitmq.client.ConnectionFactory;
-import com.rabbitmq.client.DefaultConsumer
-import com.rabbitmq.client.DeliverCallback;
+import java.nio.charset.StandardCharsets
 
 nextflow.enable.dsl=2
 
@@ -129,8 +124,11 @@ def configure_and_consume_polling(result_queue_name){
         println "Delivery tag: ${delivery_tag}"
         job_status = find_job_status(parse_body(response.getBody()))
         println "JobStatus: ${job_status}"
-        println "Canceling polling for queue: ${result_queue_name}"
-        break;
+        if (job_status == "SUCCESS" || job_status == "FAILED"){
+          println "Canceling polling for queue: ${result_queue_name}"
+          break;
+        }
+        // Anything else based on the job_status can be done here
       }
       // This should be a higher value for production
       sleep(3)
@@ -303,6 +301,7 @@ process ocrd_calamari_recognize {
   exec:
     job_status = exec_block_logic("ocrd-calamari-recognize", input_dir, output_dir, null, '{"checkpoint_dir": "qurator-gt4histocr-1.0"}')
     println "ocrd_calamari_recognize returning flag: ${job_status}"
+    exit(0)
 }
 
 workflow {
