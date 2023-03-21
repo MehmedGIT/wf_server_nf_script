@@ -14,18 +14,15 @@ import java.nio.charset.Charset
 import java.nio.charset.StandardCharsets
 
 nextflow.enable.dsl=2
+params.processing_server_address = ""
+params.mets = ""
+params.input_file_grp = ""
 
-// These parameters can also be overwritten with values passed from the CLI
-// when executing this script, i.e., --processing_server_address address
-params.processing_server_address = "localhost:8080"
-params.mets = "/home/mm/Desktop/example_ws/data/mets.xml"
-// This is the entry point for the first ocr-d processor call in the Workflow
-params.input_file_grp = "OCR-D-IMG"
-
-params.rmq_address = "localhost:5672"
-params.rmq_username = "mm-test"
-params.rmq_password = "mm-test"
+params.rmq_address = ""
+params.rmq_username = ""
+params.rmq_password = ""
 params.rmq_exchange = "ocrd-network-default"
+
 rmq_uri = "amqp://${params.rmq_username}:${params.rmq_password}@${params.rmq_address}"
 
 log.info """\
@@ -34,12 +31,13 @@ log.info """\
   processing_server_address : ${params.processing_server_address}
   mets                      : ${params.mets}
   input_file_grp            : ${params.input_file_grp}
+  rmq_exchange              : ${params.rmq_exchange}
   rmq_uri                   : ${rmq_uri}
   """
   .stripIndent()
 
 
-def produce_job_input_json(input_grp, output_grp, page_id, ocrd_params){
+def produce_job_input_json(input_grp, output_grp, page_id, ocrd_params, result_queue){
   // TODO: Using string builder should be more computationally efficient
   def json_body = """{"path": "${params.mets}","""
   if (input_grp != null)
@@ -53,18 +51,21 @@ def produce_job_input_json(input_grp, output_grp, page_id, ocrd_params){
   else
     json_body = json_body + """, "parameters": {}"""
 
+  if (result_queue != null)
+    json_body = json_body + """, "result_queue": true """
+
   json_body = json_body + """}"""
   return json_body
 }
 
-def post_processing_job(ocrd_processor, input_grp, output_grp, page_id, ocrd_params){
+def post_processing_job(ocrd_processor, input_grp, output_grp, page_id, ocrd_params, result_queue){
   def post_connection = new URL("http://${params.processing_server_address}/processor/${ocrd_processor}").openConnection()
   post_connection.setDoOutput(true)
   post_connection.setRequestMethod("POST")
   post_connection.setRequestProperty("accept", "application/json")
   post_connection.setRequestProperty("Content-Type", "application/json")
 
-  def json_body = produce_job_input_json(input_grp, output_grp, page_id, ocrd_params)
+  def json_body = produce_job_input_json(input_grp, output_grp, page_id, ocrd_params, result_queue)
   println(json_body)
 
   def httpRequestBodyWriter = new BufferedWriter(new OutputStreamWriter(post_connection.getOutputStream()))
@@ -142,7 +143,8 @@ def configure_and_consume_polling(result_queue_name){
 
 def exec_block_logic(ocrd_processor_str, input_dir, output_dir, page_id, ocrd_params){
   def String result_queue = "${ocrd_processor_str}-result"
-  post_processing_job(ocrd_processor_str, input_dir, output_dir, null, null)
+  // The last parameter is for setting the result queue field
+  post_processing_job(ocrd_processor_str, input_dir, output_dir, null, null, "true")
   def job_status = configure_and_consume_polling(result_queue)
   return job_status
 }
