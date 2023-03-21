@@ -1,23 +1,20 @@
 @Grab(group='com.rabbitmq', module='amqp-client', version='5.16.0')
-import com.rabbitmq.client.CancelCallback
 import com.rabbitmq.client.Channel
 import com.rabbitmq.client.Connection
 import com.rabbitmq.client.ConnectionFactory
-import com.rabbitmq.client.DefaultConsumer
-import com.rabbitmq.client.DeliverCallback
 
 import java.io.BufferedWriter
 import java.io.OutputStreamWriter
 import java.lang.String
-import java.lang.Thread
 import java.nio.charset.Charset
-import java.nio.charset.StandardCharsets
+import groovy.json.JsonSlurper
 
 nextflow.enable.dsl=2
+
+// The parameters are injected from the CLI
 params.processing_server_address = ""
 params.mets = ""
 params.input_file_grp = ""
-
 params.rmq_address = ""
 params.rmq_username = ""
 params.rmq_password = ""
@@ -77,6 +74,7 @@ def post_processing_job(ocrd_processor, input_grp, output_grp, page_id, ocrd_par
   if (response_code.equals(200)){
     def json = post_connection.getInputStream().getText()
     println("ResponseJSON: " + json)
+    return new JsonSlurper().parseText(json).job_id
   }
 }
 
@@ -144,7 +142,7 @@ def configure_and_consume_polling(result_queue_name){
 def exec_block_logic(ocrd_processor_str, input_dir, output_dir, page_id, ocrd_params){
   def String result_queue = "${ocrd_processor_str}-result"
   // The last parameter is for setting the result queue field
-  post_processing_job(ocrd_processor_str, input_dir, output_dir, null, null, "true")
+  def job_id = post_processing_job(ocrd_processor_str, input_dir, output_dir, null, null, "true")
   def job_status = configure_and_consume_polling(result_queue)
   return job_status
 }
