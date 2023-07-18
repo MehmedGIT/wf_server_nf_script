@@ -34,9 +34,9 @@ log.info """\
   .stripIndent()
 
 
-def produce_job_input_json(input_grp, output_grp, page_id, ocrd_params, result_queue){
+def produce_job_input_json(input_grp, output_grp, page_id, ocrd_params, result_queue_name){
   // TODO: Using string builder should be more computationally efficient
-  def json_body = """{"path": "${params.mets}","""
+  def json_body = """{"path_to_mets": "${params.mets}","""
   if (input_grp != null)
     json_body = json_body + """ "input_file_grps": ["${input_grp}"]"""
   if (output_grp != null)
@@ -48,21 +48,20 @@ def produce_job_input_json(input_grp, output_grp, page_id, ocrd_params, result_q
   else
     json_body = json_body + """, "parameters": {}"""
 
-  if (result_queue != null)
-    json_body = json_body + """, "result_queue": true """
-
+  if (result_queue_name != null)
+    json_body = json_body + """, "result_queue_name": "${result_queue_name}" """
   json_body = json_body + """}"""
   return json_body
 }
 
-def post_processing_job(ocrd_processor, input_grp, output_grp, page_id, ocrd_params, result_queue){
+def post_processing_job(ocrd_processor, input_grp, output_grp, page_id, ocrd_params, result_queue_name){
   def post_connection = new URL("http://${params.processing_server_address}/processor/${ocrd_processor}").openConnection()
   post_connection.setDoOutput(true)
   post_connection.setRequestMethod("POST")
   post_connection.setRequestProperty("accept", "application/json")
   post_connection.setRequestProperty("Content-Type", "application/json")
 
-  def json_body = produce_job_input_json(input_grp, output_grp, page_id, ocrd_params, result_queue)
+  def json_body = produce_job_input_json(input_grp, output_grp, page_id, ocrd_params, result_queue_name)
   println(json_body)
 
   def httpRequestBodyWriter = new BufferedWriter(new OutputStreamWriter(post_connection.getOutputStream()))
@@ -88,7 +87,7 @@ String find_job_status(String message_body){
   // TODO: Use Regex
   if (message_body.contains("SUCCESS")){
     return "SUCCESS"
-  } 
+  }
   else if (message_body.contains("FAILED")){
     return "FAILED"
   }
@@ -140,10 +139,10 @@ def configure_and_consume_polling(result_queue_name){
 }
 
 def exec_block_logic(ocrd_processor_str, input_dir, output_dir, page_id, ocrd_params){
-  def String result_queue = "${ocrd_processor_str}-result"
+  def String result_queue_name = "${ocrd_processor_str}-result"
   // The last parameter is for setting the result queue field
-  def job_id = post_processing_job(ocrd_processor_str, input_dir, output_dir, null, null, "true")
-  def job_status = configure_and_consume_polling(result_queue)
+  def job_id = post_processing_job(ocrd_processor_str, input_dir, output_dir, null, ocrd_params, result_queue_name)
+  def job_status = configure_and_consume_polling(result_queue_name)
   return job_status
 }
 
